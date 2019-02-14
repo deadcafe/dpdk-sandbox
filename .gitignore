@@ -1,0 +1,14 @@
+.*
+!.gitignore
+!.keepme
+*.o
+*.a
+*.so
+*.ko
+*~
+#*
+build/
+HTML/
+GPATH
+GRTAGS
+GTAGS
