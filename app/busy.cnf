@@ -1,0 +1,36 @@
+/mbufpool/MBUFPOOL/cache-size 512
+/mbufpool/MBUFPOOL/ext-size 128
+/mbufpool/MBUFPOOL/number-of-mbufs_k 512
+
+/task/busy/addon TkBusy
+
+/thread/worker0/lcore   0
+/thread/worker1/lcore   1
+/thread/worker2/lcore   2
+/thread/worker3/lcore   3
+/thread/worker4/lcore   4
+/thread/worker5/lcore   5
+/thread/worker6/lcore   6
+/thread/worker7/lcore   7
+
+/thread/worker0/tasks busy
+/thread/worker1/tasks busy
+/thread/worker2/tasks busy
+/thread/worker3/tasks busy
+/thread/worker4/tasks busy
+/thread/worker5/tasks busy
+/thread/worker6/tasks busy
+/thread/worker7/tasks busy
+
+/thread/worker0/mbufpool MBUFPOOL
+/thread/worker1/mbufpool MBUFPOOL
+/thread/worker2/mbufpool MBUFPOOL
+/thread/worker3/mbufpool MBUFPOOL
+/thread/worker4/mbufpool MBUFPOOL
+/thread/worker5/mbufpool MBUFPOOL
+/thread/worker6/mbufpool MBUFPOOL
+/thread/worker7/mbufpool MBUFPOOL
+
+/thread/worker0/is_master
+
+/rte-options	--no-pci
