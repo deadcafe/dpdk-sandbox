@@ -64,14 +64,27 @@ clean-app:
 #
 # DPDK
 #
-.PHONY:	clean-dpdk dpdk config
+.PHONY:	clean-dpdk dpdk config-dpdk
 
-dpdk:	config
+dpdk:	config-dpdk
 	$(MAKE) $(JX) -C $(RTE_SDK) all
 
-config:
+config-dpdk:
 	$(MAKE) -C $(RTE_SDK) config T=$(DPDK_CONFIG)
 
 clean-dpdk:	
 	$(MAKE) $(JX) -C $(RTE_SDK) clean
+
+
+#
+# libs
+#
+.PHONY:	clean-libs libs
+
+libs:
+	$(MAKE) -C libs all JX=$(JX)
+
+clean-libs:	
+	$(MAKE) $(JX) -C libs JX=$(JX) clean
+
 
