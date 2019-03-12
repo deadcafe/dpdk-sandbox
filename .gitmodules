@@ -4,3 +4,6 @@
 [submodule "libs/luajit"]
 	path = libs/luajit
 	url = http://luajit.org/git/luajit-2.0.git
+[submodule "libs/papi"]
+	path = libs/papi
+	url = https://bitbucket.org/icl/papi.git
