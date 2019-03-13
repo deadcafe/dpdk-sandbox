@@ -1,7 +1,7 @@
 
-all:	papi
+all:	luajit
 
-clean:	clean-papi
+clean:	clean-papi clean-luajit
 
 #
 #
@@ -9,9 +9,10 @@ clean:	clean-papi
 .PHONY:	clean-luajit luajit
 
 luajit:
+	$(MAKE) -C luajit $(JX)
 
 clean-luajit:
-
+	$(MAKE) -C luajit clean
 
 #
 #

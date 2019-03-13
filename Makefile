@@ -88,3 +88,11 @@ clean-libs:
 	$(MAKE) $(JX) -C libs JX=$(JX) clean
 
 
+#
+# pktgen-dpdk
+#
+pktgen:
+	$(MAKE) -C pktgen-dpdk $(JX) GUI=true all
+
+clean-pktgen:
+	$(MAKE) -C pktgen-dpdk GUI=true clean

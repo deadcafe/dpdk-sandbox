@@ -7,3 +7,6 @@
 [submodule "libs/papi"]
 	path = libs/papi
 	url = https://bitbucket.org/icl/papi.git
+[submodule "pktgen-dpdk"]
+	path = pktgen-dpdk
+	url = git://dpdk.org/apps/pktgen-dpdk
