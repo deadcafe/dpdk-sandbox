@@ -32,7 +32,8 @@
 
 #define ENG_PORT_INVALID_ID	UINT16_MAX
 
-#define ENG_PORT_PMD_TX_BURST	8
+#define ENG_PORT_PMD_TX_BURST	4
+#define ENG_PORT_RING_TX_BURST	4
 
 struct eng_conf_db_s;
 
@@ -87,15 +88,20 @@ struct eng_port_s {
 
     STAILQ_ENTRY(eng_port_s) node;
 
-    uint16_t port_id;
-    uint16_t queue_id;
+    union {
+        struct {
+            enum eng_netdev_type_e netdev_type;
+            uint16_t port_id;
+            uint16_t queue_id;
+            uint16_t nb_slaves;
+            uint16_t slaves[2];	/*!< slave port_id */
+        };
+        struct rte_ring *ring;
+    };
 
     enum eng_port_type_e type;
     enum eng_port_dir_e dir;
 
-    enum eng_netdev_type_e netdev_type;
-    uint16_t nb_slaves;
-    uint16_t slaves[2];	/*!< slave port_id */
 
     uint64_t tx_capa;	/* Tx offload capabilities */
     uint64_t rx_capa;	/* Rx offload capabilities */
@@ -210,22 +216,15 @@ eng_port_flush(struct eng_port_s *port)
     return port->ops.out->f_flush(port->op);
 }
 
-static inline struct eng_port_s *
-eng_port_flush_ports(struct eng_port_head_s *head,
-                     struct eng_port_s *window_pos,
-                     unsigned window_size)
+static inline void
+eng_port_flush_ports(struct eng_port_head_s *head)
 {
-    unsigned i;
-    struct eng_port_s *p = window_pos;
-    for (i = 0; i < window_size; i++) {
-        if (p->dir == ENG_PORT_DIR_OUT) {
+    struct eng_port_s *p;
+
+    STAILQ_FOREACH(p, head, node) {
+        if (p->dir == ENG_PORT_DIR_OUT)
             eng_port_flush(p);
-        }
-        if ((p = STAILQ_NEXT(p, node)) == NULL) {
-            p = STAILQ_FIRST(head);
-        }
     }
-    return p;
 }
 
 static inline void

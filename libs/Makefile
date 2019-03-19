@@ -1,7 +1,7 @@
 
-all:	luajit
+all:	papi
 
-clean:	clean-papi clean-luajit
+clean:	clean-papi
 
 #
 #
@@ -23,8 +23,7 @@ config-papi:
 	$(MAKE) -C papi/src -f Makefile.configure
 
 papi:	config-papi
-	$(MAKE) -C papi/src $(JX) all
-	$(MAKE) -C papi/src install
+	$(MAKE) -C papi/src all install
 
 clean-papi:
 	$(MAKE) -C papi/src clean

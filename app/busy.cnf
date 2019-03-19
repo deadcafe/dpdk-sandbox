@@ -1,36 +1,116 @@
 /mbufpool/MBUFPOOL/cache-size 512
 /mbufpool/MBUFPOOL/ext-size 128
-/mbufpool/MBUFPOOL/number-of-mbufs_k 512
+/mbufpool/MBUFPOOL/number-of-mbufs_k 256
 
-/task/busy/addon TkBusy
+/ring/null-0/size 128
+/ring/null-1/size 128
+/ring/null-2/size 128
+/ring/null-3/size 128
+/ring/null-4/size 128
+/ring/null-5/size 128
 
-/thread/worker0/lcore   0
-/thread/worker1/lcore   1
-/thread/worker2/lcore   2
-/thread/worker3/lcore   3
-/thread/worker4/lcore   4
-/thread/worker5/lcore   5
-/thread/worker6/lcore   6
-/thread/worker7/lcore   7
+/ring/cmd-0/size 8
+/ring/cmd-1/size 8
 
-/thread/worker0/tasks busy
-/thread/worker1/tasks busy
-/thread/worker2/tasks busy
-/thread/worker3/tasks busy
-/thread/worker4/tasks busy
-/thread/worker5/tasks busy
-/thread/worker6/tasks busy
-/thread/worker7/tasks busy
+/ring/rx/size 256
 
+/port/null-0/depend /ring/null-0
+#/port/null-0/retry 1
+
+/port/null-1/depend /ring/null-1
+#/port/null-1/retry 1
+
+/port/null-2/depend /ring/null-2
+#/port/null-2/retry 1
+
+/port/null-3/depend /ring/null-3
+#/port/null-3/retry 1
+
+/port/null-4/depend /ring/null-4
+#/port/null-4/retry 1
+
+/port/null-5/depend /ring/null-5
+#/port/null-5/retry 1
+
+/port/cmd-0/depend /ring/cmd-0
+/port/cmd-1/depend /ring/cmd-1
+
+/port/rx/depend /ring/rx
+/port/rx/retry 0
+
+/task/cmd-0/addon TkCmd
+/task/cmd-0/in-port cmd-0
+/task/cmd-1/addon TkCmd
+/task/cmd-1/in-port cmd-1
+
+/task/null-0/addon TkNull
+/task/null-0/in-port null-0
+
+/task/null-1/addon TkNull
+/task/null-1/in-port null-1
+
+/task/null-2/addon TkNull
+/task/null-2/in-port null-2
+
+/task/null-3/addon TkNull
+/task/null-3/in-port null-3
+
+/task/null-4/addon TkNull
+/task/null-4/in-port null-4
+
+/task/null-5/addon TkNull
+/task/null-5/in-port null-5
+
+/task/tx-0/addon TkTx
+/task/tx-0/out-ports rx
+
+/task/tx-1/addon TkTx
+/task/tx-1/out-ports rx
+
+/task/tx-2/addon TkTx
+/task/tx-2/out-ports rx
+
+/task/tx-3/addon TkTx
+/task/tx-3/out-ports rx
+
+/task/tx-4/addon TkTx
+/task/tx-4/out-ports rx
+
+/task/tx-5/addon TkTx
+/task/tx-5/out-ports rx
+
+/task/rx/addon TkRx
+/task/rx/in-port rx
+/task/rx/out-ports null-0,null-1,null-2,null-3
+#/task/rx/out-ports null-0,null-1,null-2,null-3,null-4,null-5
+
+/thread/master/lcore	6
+/thread/rx/lcore        7
+/thread/worker0/lcore   2
+/thread/worker1/lcore   3
+/thread/worker2/lcore   4
+/thread/worker3/lcore   5
+#/thread/worker4/lcore   0
+#/thread/worker5/lcore   1
+
+/thread/master/tasks cmd-0
+/thread/rx/tasks rx,cmd-1
+/thread/worker0/tasks null-0,tx-0
+/thread/worker1/tasks null-1,tx-1
+/thread/worker2/tasks null-2,tx-2
+/thread/worker3/tasks null-3,tx-3
+#/thread/worker4/tasks null-4,tx-4
+#/thread/worker5/tasks null-5,tx-5
+
+/thread/master/mbufpool MBUFPOOL
+/thread/rx/mbufpool MBUFPOOL
 /thread/worker0/mbufpool MBUFPOOL
 /thread/worker1/mbufpool MBUFPOOL
 /thread/worker2/mbufpool MBUFPOOL
 /thread/worker3/mbufpool MBUFPOOL
-/thread/worker4/mbufpool MBUFPOOL
-/thread/worker5/mbufpool MBUFPOOL
-/thread/worker6/mbufpool MBUFPOOL
-/thread/worker7/mbufpool MBUFPOOL
+#/thread/worker4/mbufpool MBUFPOOL
+#/thread/worker5/mbufpool MBUFPOOL
 
-/thread/worker0/is_master
+/thread/master/is_master
 
 /rte-options	--no-pci

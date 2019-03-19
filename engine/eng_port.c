@@ -1339,6 +1339,8 @@ create_port_pmd(struct eng_conf_db_s *db,
 
     port->op = NULL;
     port->dir = dir;
+    port->type = ENG_PORT_TYPE_PMD;
+
     port->port_id = port_id;
     port->netdev_type = get_netdev_type(db, dev_name);
 
@@ -1453,12 +1455,16 @@ create_port_ring(struct eng_conf_db_s *db,
     }
 
     snprintf(port->name, sizeof(port->name), "%s", port_name);
-
     port->dir = dir;
+    port->type = ENG_PORT_TYPE_RING;
+    port->ring = ring;
+
+#if 0
     port->port_id = ENG_PORT_INVALID_ID;
     port->queue_id = ENG_PORT_INVALID_ID;
     port->netdev_type = ENG_NETDEV_TYPE_INVALID;
     port->nb_slaves = 0;
+#endif
 
     if (dir == ENG_PORT_DIR_IN) {
         struct rte_port_ring_reader_params params;
@@ -1478,12 +1484,12 @@ create_port_ring(struct eng_conf_db_s *db,
 
         if (retries < 0) {
             params.normal.ring = ring;
-            params.normal.tx_burst_sz = 16;
+            params.normal.tx_burst_sz = ENG_PORT_RING_TX_BURST;
 
             ops = &rte_port_ring_multi_writer_ops;
         } else {
             params.nodrop.ring = ring;
-            params.nodrop.tx_burst_sz = 16;
+            params.nodrop.tx_burst_sz = ENG_PORT_RING_TX_BURST;
             params.nodrop.n_retries = retries;
 
             ops = &rte_port_ring_multi_writer_nodrop_ops;

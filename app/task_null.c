@@ -20,10 +20,10 @@ NullTaskInit(struct eng_conf_db_s *conf __rte_unused,
 {
     int ret = -EINVAL;
 
-    if (!task->in_port || task->nb_out_ports != 1) {
+    if (!task->in_port) {
         ENG_ERR(APP,
-                "%s invalid ports. in_port:%p out_ports:%u\n",
-                __func__, task->in_port, task->nb_out_ports);
+                "%s nothing in-port :%p\n",
+                __func__, task->in_port);
     } else {
         ret = app_global_db_add_task(task);
     }
@@ -32,33 +32,59 @@ NullTaskInit(struct eng_conf_db_s *conf __rte_unused,
     return ret;
 }
 
-static char MbufSentinel[1024] __rte_cache_aligned;
+static struct rte_mbuf MbufSentinel __rte_cache_aligned;
 
 static unsigned
 NullTaskEntry(struct eng_thread_s *th __rte_unused,
               struct eng_task_s *task,
               uint64_t now __rte_unused)
 {
-    unsigned nb, nb_pkt = 0;
-    struct rte_mbuf *buff[32 + 1];
+    unsigned nb;
+    struct rte_mbuf *buff[32 + 4];
 
-    while((nb = eng_port_recv(task->in_port, buff, RTE_DIM(buff) - 1)) > 0) {
-        buff[nb] = (struct rte_mbuf *) MbufSentinel;
+    nb = eng_port_recv(task->in_port, buff, RTE_DIM(buff) - 4);
+    if (nb) {
+        buff[nb + 0] = &MbufSentinel;
+        buff[nb + 1] = &MbufSentinel;
+        buff[nb + 2] = &MbufSentinel;
+        buff[nb + 3] = &MbufSentinel;
 
-        unsigned shift = ((RTE_DIM(buff) - 1) - nb);
-        uint64_t mask = UINT64_C(-1);
+        rte_prefetch0(buff[0]);
+        rte_prefetch0(buff[1]);
+        rte_prefetch0(buff[2]);
+        rte_prefetch0(buff[3]);
 
-        mask <<= shift;
-        mask >>= shift;
-        eng_port_send_bulk(task->out_ports[0], buff, mask);
-
-        nb_pkt += nb;
+        unsigned cnt = 0;
+        switch (nb % 4) {
+        case 0:
+            while (cnt != nb) {
+                rte_prefetch0(buff[cnt + 4]);
+                rte_pktmbuf_free(buff[cnt]);
+                cnt++;
+                /* fall-through */
+        case 3:
+                rte_prefetch0(buff[cnt + 4]);
+                rte_pktmbuf_free(buff[cnt]);
+                cnt++;
+                /* fall-through */
+        case 2:
+                rte_prefetch0(buff[cnt + 4]);
+                rte_pktmbuf_free(buff[cnt]);
+                cnt++;
+                /* fall-through */
+        case 1:
+                rte_prefetch0(buff[cnt + 4]);
+                rte_pktmbuf_free(buff[cnt]);
+                cnt++;
+                /* fall-through */
+            }
+        }
     }
-    return nb_pkt;
+    return nb;
 }
 
 static const struct eng_addon_s Addon = {
-    .name       = "NullTask",
+    .name       = "TkNull",
     .task_init  = NullTaskInit,
     .task_entry = NullTaskEntry,
 };

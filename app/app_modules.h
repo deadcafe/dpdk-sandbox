@@ -15,4 +15,15 @@
 #define ENG_LOG_ID_TASKBUSY	4
 #define ENG_LOG_NAME_TASKBUSY	"TkBusy"
 
+#define ENG_LOG_ID_TASKRX	5
+#define ENG_LOG_NAME_TASKRX	"TkRx"
+
+#define ENG_LOG_ID_TASKTX	6
+#define ENG_LOG_NAME_TASKTX	"TkTx"
+
+#define ENG_LOG_ID_TASKCMD	7
+#define ENG_LOG_NAME_TASKCMD	"TkCmd"
+
+
+
 #endif /* !_APP_MODULES_H_ */

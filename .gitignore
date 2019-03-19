@@ -5,8 +5,11 @@
 *.a
 *.so
 *.ko
+*.hst
 *~
 #*
+core.*
+core
 build/
 HTML/
 GPATH

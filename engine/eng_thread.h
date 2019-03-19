@@ -46,25 +46,6 @@ struct eng_usage_s {
 
 struct eng_thread_s;
 
-/*
- *
- */
-struct eng_master_ctroller_s {
-    volatile int cmd;	/* request for master */
-    volatile int ret;
-
-    uint16_t port_id;	/* input option param */
-    uint16_t _reserved;
-
-    unsigned nb_threads;
-    rte_spinlock_t cmd_mutex;
-
-    /* thread Zero is master thread */
-    struct eng_thread_s *th_info[RTE_MAX_LCORE];
-
-    MARKER cacheline1 __rte_cache_min_aligned;
-    uint8_t data[1024 * 16];	/* command interface area */
-};
 
 /*
  *
@@ -72,8 +53,7 @@ struct eng_master_ctroller_s {
 enum eng_thread_state_e {
     ENG_THREAD_STATE_STOP = 0,	/*!< stop running */
     ENG_THREAD_STATE_RUNNING,	/*!< normal */
-    ENG_THREAD_STATE_CMD,		/*!< CMD exec(master only) */
-    ENG_THREAD_STATE_EXIT,		/*!< do exit */
+    ENG_THREAD_STATE_EXIT,	/*!< do exit */
 };
 
 struct eng_thread_s;
@@ -128,9 +108,6 @@ struct eng_thread_s {
 
     struct rte_mempool *mp;
     void *addon_thread_ext;
-    struct eng_port_s *flush_window_pos;
-#define ENG_FLUSH_WINDOW_SIZE 8
-    unsigned flush_window_size;
 
     rte_atomic32_t state;	/* changed by self */
 
@@ -173,45 +150,38 @@ eng_thread_lcores(struct eng_conf_db_s *db,
  *
  */
 extern int
-eng_thread_cmd_slaves(struct eng_master_ctroller_s *ctrl,
-                      enum eng_thread_state_e cmd);
-
-/*
- *
- */
-extern int
-eng_thread_cmd_master(struct eng_master_ctroller_s *ctrl,
-                      enum eng_thread_state_e cmd);
-
-/*
- *
- */
-extern struct eng_master_ctroller_s *
-eng_find_master_ctrl(void);
-
-/*
- * master thread cmd handler
- */
-typedef enum eng_thread_state_e (*eng_cmd_handler_t)(struct eng_master_ctroller_s *, enum eng_thread_state_e);
-
-/*
- *
- */
-extern int
-fpe_register_cmd_handler(int cmd,
-                         eng_cmd_handler_t handler);
-
-/*
- *
- */
-extern int
-eng_thread_second(char *prog,
+eng_thread_second(const char *prog,
                   unsigned lcore);
 
 /*
  *
  */
 extern struct eng_thread_s *
-eng_thread_info(void);
+eng_thread_self_info(void);
+
+extern void
+eng_thread_cmd_set(struct eng_thread_s *self,
+                   enum eng_thread_state_e cmd);
+
+extern unsigned
+eng_thread_nb_threads(void);
+
+struct eng_thread_s *
+eng_thread_info_th(unsigned th_id);
+
+extern bool
+eng_primary_is_dead(void);
+
+extern void
+eng_thread_master_exit(void);
+
+extern bool
+eng_thread_is_valid(unsigned thread_id);
+
+extern int
+eng_thread2lcore(unsigned thread_id);
+
+extern int
+eng_lcore2thread(unsigned lcore_id);
 
 #endif /* !_ENG_THREAD_H_ */

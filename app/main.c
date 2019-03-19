@@ -7,19 +7,27 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#include <papi.h>
+
 #include <rte_log.h>
+#include <rte_errno.h>
 
 /* engine APIs */
 #include <eng_conf.h>
 #include <eng_addon.h>
 #include <eng_thread.h>
 #include <eng_log.h>
+#include <eng_cli.h>
+#include <eng_cmd.h>
 
 #include "app_modules.h"
 #include "global_db.h"
 #include "task_null.h"
 #include "task_busy.h"
-
+#include "task_rx.h"
+#include "task_tx.h"
+#include "task_cmd.h"
+#include "cmd_perf.h"
 
 /****************************************************************************
  *
@@ -47,9 +55,21 @@ db_dump(struct eng_conf_db_s *db)
 static void
 signal_handler(int sig_no)
 {
-    (void) sig_no;
+    fprintf(stderr, "catch signal:%d\n", sig_no);
 
-    /* not yet */
+    switch (sig_no) {
+    case SIGINT:
+        eng_thread_master_exit();
+        break;
+
+    case SIGTERM:
+        eng_thread_master_exit();
+        rte_exit(1, "xxx");
+        break;
+
+    default:
+        break;
+    }
 }
 
 static struct eng_signal_s EngSignal = {
@@ -57,14 +77,54 @@ static struct eng_signal_s EngSignal = {
 };
 
 static int
+init_papi(void)
+{
+    int ret = PAPI_library_init(PAPI_VER_CURRENT);
+    if (ret < 0) {
+        fprintf(stderr, "failed init PAPI library. %d\n", ret);
+        goto end;
+    } else if (ret != PAPI_VER_CURRENT) {
+        fprintf(stderr, "PAPI library version mismatch\n");
+        ret = -ENODEV;
+        goto end;
+    }
+
+    if (PAPI_is_initialized() != PAPI_LOW_LEVEL_INITED)
+        fprintf(stderr, "PAPI is un-initialized.\n");
+
+    ret = PAPI_thread_init(pthread_self);
+    if (ret != PAPI_OK) {
+        fprintf(stderr, "not supported PAPI threads. %d\n", ret);
+        goto end;
+    }
+
+    ret = PAPI_num_counters();
+    if (ret <= 0) {
+        fprintf(stderr, "not supported PAPI counters. %d\n", ret);
+        goto end;
+    }
+    fprintf(stderr, "PAPI counters:%d\n", ret);
+    ret = 0;
+
+ end:
+    return ret;
+}
+
+static int
 primay_process(const char *prog,
                const char *fconf,
                struct eng_signal_s *eng_signal)
 {
-    int ret = -1;
-    struct eng_conf_db_s *db = eng_conf_create("Deadcafe");
+    struct eng_conf_db_s *db = NULL;
+
+    int ret = init_papi();
+    if (ret)
+        goto end;
+
+    db = eng_conf_create("Deadcafe");
     if (!db) {
         fprintf(stderr, "cannot create configuration DB.\n");
+        ret = -1;
         goto end;
     }
 
@@ -73,6 +133,9 @@ primay_process(const char *prog,
      */
     app_task_null_register();
     app_task_busy_register();
+    app_task_rx_register();
+    app_task_tx_register();
+    app_task_cmd_register();
 
     if (eng_conf_setup_addon(db)) {
         fprintf(stderr, "failed to setup addon.\n");
@@ -89,8 +152,10 @@ primay_process(const char *prog,
     /*
      * set some signals ,,, not yet
      */
+    sigaddset(&eng_signal->sigset, SIGINT);
+    sigaddset(&eng_signal->sigset, SIGTERM);
 
-    if (sigisemptyset(&eng_signal->sigset)) {
+    if (!sigisemptyset(&eng_signal->sigset)) {
         if (sigprocmask(SIG_BLOCK, &eng_signal->sigset, NULL)) {
             fprintf(stderr, "failed to set procmask\n");
             goto end;
@@ -102,9 +167,6 @@ primay_process(const char *prog,
     fprintf(stderr, "begin init\n");
     ret = eng_conf_init_rte(db, prog);
     if (0 < ret) {
-        ret = app_global_db_init();
-        if (ret)
-            goto end;
         /*
          * app log
          */
@@ -112,6 +174,21 @@ primay_process(const char *prog,
         eng_log_register(ENG_LOG_ID_GLOBALDB, ENG_LOG_NAME_GLOBALDB);
         eng_log_register(ENG_LOG_ID_TASKNULL, ENG_LOG_NAME_TASKNULL);
         eng_log_register(ENG_LOG_ID_TASKBUSY, ENG_LOG_NAME_TASKBUSY);
+        eng_log_register(ENG_LOG_ID_TASKRX,   ENG_LOG_NAME_TASKRX);
+        eng_log_register(ENG_LOG_ID_TASKTX,   ENG_LOG_NAME_TASKTX);
+        eng_log_register(ENG_LOG_ID_TASKCMD,  ENG_LOG_NAME_TASKCMD);
+
+        ret = app_global_db_init();
+        if (ret)
+            goto end;
+
+        ret = eng_cmd_init();
+        if (ret)
+            goto end;
+
+        ret = cmd_perf_init();
+        if (ret)
+            goto end;
 
         fprintf(stderr, "begin launching\n");
         ret = eng_thread_launch(db, eng_signal);
@@ -123,25 +200,49 @@ primay_process(const char *prog,
     return ret;
 }
 
+static const char *LogLevel[] = {
+    "emerg",
+    "alert",
+    "critical",
+    "error",
+    "warning",
+    "notice",
+    "info",
+    "debug",
+};
+
+
+static inline int
+str2loglevel(const char *name)
+{
+    for (unsigned i = 0; i < RTE_DIM(LogLevel); i++) {
+        if (!strncasecmp(LogLevel[i], name, strlen(LogLevel[i])))
+            return i;
+    }
+    return -1;
+}
+
 static int
-secondary_process(struct eng_signal_s *eng_signal)
+secondary_process(const char *prog,
+                  const char *hname,
+                  struct eng_signal_s *eng_signal)
 {
     (void) eng_signal;
+    int ret = eng_thread_second(prog, 0);
 
-    /* XXX: not yet */
-    return -1;
+    if (!ret)
+        ret = eng_cmd_loop(NULL, hname);
+    return ret;
 }
 
 static void
 usage(const char *prog)
 {
     fprintf(stderr,
-            "%s [-f ConfigFile] [-n NUM] [-2] [-s | -c | -a | -l | -r]\n"
-            "-s	spinlock(default)\n"
-            "-c	CAS\n"
-            "-a	Atomic\n"
-            "-l	HLE\n"
-            "-r	RTM\n",
+            "%s [-f FNAME] [-2]\n"
+            "-f FNAME	configuration file name\n"
+            "-i HNAME	history file name\n"
+            "-2		Secondary process mode\n",
             prog);
 }
 
@@ -149,24 +250,19 @@ int
 main(int ac,
      char **av)
 {
-    char *prog = strrchr(av[0], '/');
     int opt;
     char *fname = NULL;
     bool is_2nd = false;
-    enum busy_type_e type = TYPE_SPINLOCK;
-    unsigned nb = 0;
+    char *prog = strrchr(av[0], '/');
+    char *hname = "./hoge.history";
 
     if (prog)
         prog++;
     else
         prog = av[0];
 
-    while ((opt = getopt(ac, av, "n:f:2scalrh")) != -1) {
+    while ((opt = getopt(ac, av, "f:i:2h")) != -1) {
         switch (opt) {
-        case 'n':
-            nb = atoi(optarg);
-            break;
-
         case 'f':
             fname = optarg;
             break;
@@ -175,24 +271,8 @@ main(int ac,
             is_2nd = true;
             break;
 
-        case 's':
-            type = TYPE_SPINLOCK;
-            break;
-
-        case 'c':
-            type = TYPE_CAS;
-            break;
-
-        case 'a':
-            type = TYPE_ATOMIC;
-            break;
-
-        case 'l':
-            type = TYPE_HLE;
-            break;
-
-        case 'r':
-            type = TYPE_RTM;
+        case 'i':
+            hname = optarg;
             break;
 
         case 'h':
@@ -202,16 +282,10 @@ main(int ac,
         }
     }
 
-    if (app_task_busy_set_type(type))
-        return -1;
-    if (nb)
-        app_task_busy_set_nb(nb);
-
-    if (is_2nd) {
-        secondary_process(&EngSignal);
-    } else {
+    if (is_2nd)
+        secondary_process(prog, hname, &EngSignal);
+    else
         primay_process(prog, fname, &EngSignal);
-    }
 
     return 0;
 }

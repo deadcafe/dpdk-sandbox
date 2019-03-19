@@ -27,6 +27,8 @@
 #include <rte_cycles.h>
 #include <rte_errno.h>
 
+#include "papi.h"
+
 #include "conf.h"
 #include "eng_port.h"
 #include "eng_mbuf.h"
@@ -34,67 +36,66 @@
 #include "eng_addon.h"
 #include "eng_thread.h"
 #include "eng_panic.h"
+#include "eng_cli.h"
 
-static struct eng_thread_s *LCoreInfo[RTE_MAX_LCORE];
-static struct eng_master_ctroller_s *MasterCtrl;
+struct thread_mng_s {
+    struct eng_thread_s *lcores[RTE_MAX_LCORE];
+    struct eng_thread_s *threads[RTE_MAX_LCORE];
+    const struct rte_memzone *mz;
+    unsigned nb_threads;
+    pid_t primary;
 
-#define ENG_MSTER_CONTROLLER	"ENG_MASTER_CONTROLLER"
+    volatile bool is_dead __rte_cache_aligned;
 
-static enum eng_thread_state_e
-cmd_handler(struct eng_master_ctroller_s *ctrl,
-            enum eng_thread_state_e state)
+} __attribute__((aligned(RTE_CACHE_LINE_SIZE)));
+
+#define ENG_THREAD_MANAGER "EngineThreadManager"
+static struct thread_mng_s *Mng;
+
+static inline struct thread_mng_s *
+find_mng(void)
 {
-    ctrl->ret = -EINVAL;
-    return state;
+    struct thread_mng_s *mng = Mng;
+
+    if (!mng) {
+        const struct rte_memzone *mz;
+
+        mz = rte_memzone_lookup(ENG_THREAD_MANAGER);
+        if (mz) {
+            mng = mz->addr;
+            Mng = mng;
+        }
+    }
+    return mng;
 }
 
-static eng_cmd_handler_t CmdHandlers[32] = {
-    [0] = cmd_handler,
-    [1] = cmd_handler,
-    [2] = cmd_handler,
-    [3] = cmd_handler,
-    [4] = cmd_handler,
-    [5] = cmd_handler,
-    [6] = cmd_handler,
-    [7] = cmd_handler,
-    [8] = cmd_handler,
-    [9] = cmd_handler,
-    [10] = cmd_handler,
-    [11] = cmd_handler,
-    [12] = cmd_handler,
-    [13] = cmd_handler,
-    [14] = cmd_handler,
-    [15] = cmd_handler,
-    [16] = cmd_handler,
-    [17] = cmd_handler,
-    [18] = cmd_handler,
-    [19] = cmd_handler,
-    [20] = cmd_handler,
-    [21] = cmd_handler,
-    [22] = cmd_handler,
-    [23] = cmd_handler,
-    [24] = cmd_handler,
-    [25] = cmd_handler,
-    [26] = cmd_handler,
-    [27] = cmd_handler,
-    [28] = cmd_handler,
-    [29] = cmd_handler,
-    [30] = cmd_handler,
-    [31] = cmd_handler,
-};
-
-int
-fpe_register_cmd_handler(int cmd,
-                         eng_cmd_handler_t handler)
+static int
+mng_init(void)
 {
-    if (!handler || cmd < 0 || (int) RTE_DIM(CmdHandlers) <= cmd)
-        return -EINVAL;
+    struct thread_mng_s *mng = find_mng();
+    int ret = 0;
 
-    if (CmdHandlers[cmd] != cmd_handler)
-        return -EEXIST;
+    if (!mng) {
+        const struct rte_memzone *mz;
 
-    CmdHandlers[cmd] = handler;
-    return 0;
+        mz = rte_memzone_reserve(ENG_THREAD_MANAGER,
+                                 sizeof(*mng),
+                                 rte_socket_id(),
+                                 RTE_MEMZONE_2MB | RTE_MEMZONE_1GB |
+                                 RTE_MEMZONE_SIZE_HINT_ONLY);
+        if (!mz) {
+            ret = -ENOMEM;
+            goto end;
+        }
+
+        mng = mz->addr;
+        memset(mng, 0, sizeof(*mng));
+        mng->mz = mz;
+        mng->primary = getpid();
+        Mng = mng;
+    }
+ end:
+    return ret;
 }
 
 /*
@@ -103,7 +104,10 @@ fpe_register_cmd_handler(int cmd,
 static inline enum eng_thread_state_e
 read_thread_state(struct eng_thread_s *th)
 {
-    return (enum eng_thread_state_e) rte_atomic32_read(&th->state);
+    enum eng_thread_state_e state =
+        (enum eng_thread_state_e) rte_atomic32_read(&th->state);
+    rte_rmb();
+    return state;
 }
 
 static inline enum eng_thread_state_e
@@ -111,137 +115,95 @@ set_thread_state(struct eng_thread_s *th,
                  enum eng_thread_state_e state)
 {
     rte_atomic32_set(&th->state, state);
-    rte_mb();
+    rte_wmb();
     return state;
 }
 
 static inline enum eng_thread_state_e
 read_thread_cmd(struct eng_thread_s *th)
 {
-    return (enum eng_thread_state_e) rte_atomic32_read(&th->cmd);
+    enum eng_thread_state_e cmd =
+        (enum eng_thread_state_e) rte_atomic32_read(&th->cmd);
+    rte_rmb();
+    return cmd;
 }
 
-static inline void
+static inline enum eng_thread_state_e
 set_thread_cmd(struct eng_thread_s *th,
                enum eng_thread_state_e cmd)
 {
     rte_atomic32_set(&th->cmd, cmd);
-    rte_mb();
+    rte_wmb();
+    return cmd;
 }
 
-/*
- *
- */
-static inline struct eng_master_ctroller_s *
-find_master_ctrl(void)
+void
+eng_thread_cmd_set(struct eng_thread_s *self,
+                   enum eng_thread_state_e cmd)
 {
-    struct eng_master_ctroller_s *ctrl = MasterCtrl;
+    struct thread_mng_s *mng = find_mng();
 
-    if (!ctrl) {
-        const struct rte_memzone *mz;
-
-        mz = rte_memzone_lookup(ENG_MSTER_CONTROLLER);
-        if (mz) {
-            ctrl = mz->addr;
-            MasterCtrl = ctrl;
-        }
+    for (unsigned i = 0; i < mng->nb_threads; i++) {
+        if (mng->threads[i] == self)
+            continue;
+        set_thread_cmd(mng->threads[i], cmd);
     }
-    ENG_PANIC(!ctrl, "Not found master controller");
+    for (unsigned i = 0; i < mng->nb_threads; i++) {
+        if (mng->threads[i] == self)
+            continue;
 
-    return ctrl;
-}
-
-struct eng_master_ctroller_s *
-eng_find_master_ctrl(void)
-{
-    return find_master_ctrl();
-}
-
-/*
- *
- */
-static struct eng_master_ctroller_s *
-create_master_ctrl(void)
-{
-    struct eng_master_ctroller_s *ctrl = MasterCtrl;
-
-    if (!ctrl) {
-        const struct rte_memzone *mz;
-
-        mz = rte_memzone_reserve(ENG_MSTER_CONTROLLER,
-                                 sizeof(*ctrl), rte_socket_id(),
-                                 RTE_MEMZONE_2MB | RTE_MEMZONE_1GB |
-                                 RTE_MEMZONE_SIZE_HINT_ONLY);
-        if (mz) {
-            ctrl = mz->addr;
-
-            memset(ctrl, 0, sizeof(*ctrl));
-            rte_spinlock_init(&ctrl->cmd_mutex);
-            MasterCtrl = ctrl;
-        }
-    }
-    return ctrl;
-}
-
-/*
- * change Slave state by Master
- */
-int
-eng_thread_cmd_slaves(struct eng_master_ctroller_s *ctrl,
-                      enum eng_thread_state_e cmd)
-{
-    if (cmd != ENG_THREAD_STATE_STOP &&
-        cmd != ENG_THREAD_STATE_RUNNING)
-        return -EINVAL;
-
-    for (unsigned i = 1; i < ctrl->nb_threads; i++)
-        set_thread_cmd(ctrl->th_info[i], cmd);
-
-    for (unsigned i = 1; i < ctrl->nb_threads; i++) {
-        while (read_thread_state(ctrl->th_info[i]) != cmd)
+        uint64_t limit = rte_rdtsc() + rte_get_tsc_hz();
+        while (read_thread_state(mng->threads[i]) != cmd) {
+            if (limit < rte_rdtsc()) {
+                ENG_ERR(CORE, "give up. ignored:%s",
+                        mng->threads[i]->name);
+                break;
+            }
             rte_pause();
+        }
     }
-    return 0;
 }
 
-/*
- * change Master state by CLI
- */
-int
-eng_thread_cmd_master(struct eng_master_ctroller_s *ctrl,
-                      enum eng_thread_state_e cmd)
+void
+eng_thread_master_exit(void)
 {
-    int ret = 0;
+    struct thread_mng_s *mng = find_mng();
 
-    if (cmd < ENG_THREAD_STATE_STOP || ENG_THREAD_STATE_EXIT < cmd)
-        return -EINVAL;
-
-    ctrl->ret = 0;
-    set_thread_cmd(ctrl->th_info[0], cmd);
-
-    while (read_thread_state(ctrl->th_info[0])
-           != read_thread_cmd(ctrl->th_info[0]))
-        rte_pause();
-
-    ret = ctrl->ret;
-    return ret;
+    if (mng) {
+        set_thread_cmd(mng->threads[0], ENG_THREAD_STATE_EXIT);
+    }
 }
 
-/*
- * return: next state
- */
-static inline enum eng_thread_state_e
-exec_cmd(struct eng_master_ctroller_s *ctrl,
-         enum eng_thread_state_e state)
+__attribute__((destructor)) static void
+set_dead(void)
 {
-    if (ctrl->cmd < 0 || (int) RTE_DIM(CmdHandlers) <= ctrl->cmd) {
-        ENG_ERR(CORE, "invalid cmd:%d\n", ctrl->cmd);
-        ctrl->ret = -EINVAL;
+    struct thread_mng_s *mng = find_mng();
+
+    if (mng && !mng->is_dead) {
+        if (mng->primary == getpid() &&
+            rte_lcore_id() == rte_get_master_lcore()) {
+            mng->is_dead = true;
+            rte_wmb();
+            fprintf(stderr, "i'm dead.\n");
+        } else {
+            fprintf(stderr, "i'm not master.\n");
+        }
+    }
+}
+
+bool
+eng_primary_is_dead(void)
+{
+    struct thread_mng_s *mng = find_mng();
+    bool ret = false;
+
+    if (mng) {
+        ret = mng->is_dead;
+        rte_rmb();
     } else {
-        state = CmdHandlers[ctrl->cmd](ctrl, state);
+        fprintf(stderr, "not found mng.\n");
     }
-
-    return state;
+    return ret;
 }
 
 /*
@@ -258,19 +220,19 @@ task_sched(struct eng_thread_s *th)
     unsigned th_cnt = 0;
 
     STAILQ_FOREACH(task, &th->tasks, node) {
-        unsigned ret;
+        unsigned nb;
         uint64_t last, sub;
 #if 0
         ENG_ERR(CORE, "th:%s tsk:%s", th->name, task->name);
 #endif
-        ret = task->entry(th, task, now);
+        nb = task->entry(th, task, now);
 
         last = now;
         now = rte_rdtsc();
         sub = now - last;
 
-        if (ret) {
-            task->usage.events += ret;
+        if (nb) {
+            task->usage.events += nb;
             task->usage.execs += 1;
             task->usage.tsc_sum += sub;
 
@@ -286,7 +248,7 @@ task_sched(struct eng_thread_s *th)
         task->usage.update = now;
 
         th_sub += sub;
-        th_cnt += ret;
+        th_cnt += nb;
     }
 
     if (th_cnt) {
@@ -308,6 +270,12 @@ task_sched(struct eng_thread_s *th)
     return th_cnt;
 }
 
+static const char *StateName[] = {
+    "Stop",
+    "Run",
+    "Exit",
+};
+
 /*
  *
  */
@@ -315,84 +283,97 @@ static void
 thread_loop(struct eng_thread_s *th)
 {
     th->start_tsc = rte_rdtsc();
-    ENG_WARN(CORE, "waked up: %s %"PRIu64, th->name, th->start_tsc);
+    ENG_WARN(CORE, "thread start: %s %"PRIu64, th->name, th->start_tsc);
 
     bool is_master = (rte_lcore_id() == rte_get_master_lcore());
-
-   if (is_master)
+    if (is_master) {
         set_thread_cmd(th, ENG_THREAD_STATE_RUNNING);
+        eng_thread_cmd_set(th, ENG_THREAD_STATE_RUNNING);
+    }
 
-   struct eng_master_ctroller_s *ctrl = find_master_ctrl();
-   enum eng_thread_state_e cmd, state = read_thread_state(th);
-   while ((cmd = read_thread_cmd(th)) != ENG_THREAD_STATE_EXIT) {
+    enum eng_thread_state_e state, cmd;
+    state = read_thread_state(th);
 
-       if (cmd != state) {
-           enum eng_thread_state_e next_state = cmd;
+    while (1) {
+        cmd = read_thread_cmd(th);
+#if 0
+        ENG_DEBUG(CORE, "%s state:%s cmd:%s", th->name,
+                  StateName[state], StateName[cmd]);
+#endif
 
-           switch (cmd) {
-           case ENG_THREAD_STATE_STOP:
-               /* flush all ports */
-               th->flush_window_pos
-                   = eng_port_flush_ports(&th->ports,
-                                         STAILQ_FIRST(&th->ports),
-                                         th->nb_ports);
-               if (is_master)
-                   eng_thread_cmd_slaves(ctrl, ENG_THREAD_STATE_STOP);
+        if (unlikely(cmd != state)) {
 
-               ENG_DEBUG(CORE, "stop %s", th->name);
-               break;
+            ENG_DEBUG(CORE, "%s %s -> %s %"PRIu64, th->name,
+                      StateName[state], StateName[cmd],
+                      th->start_tsc);
 
-           case ENG_THREAD_STATE_RUNNING:
-               if (is_master)
-                   eng_thread_cmd_slaves(ctrl, ENG_THREAD_STATE_RUNNING);
+            switch (cmd) {
+            case ENG_THREAD_STATE_STOP:
+                /* flush all ports */
+                eng_port_flush_ports(&th->ports);
+                break;
 
-               th->flush_window_pos = STAILQ_FIRST(&th->ports);
-               ENG_DEBUG(CORE, "start %s %"PRIu64, th->name, th->start_tsc);
-               break;
+            case ENG_THREAD_STATE_RUNNING:
+                break;
 
-           case ENG_THREAD_STATE_CMD:
-               if (is_master)
-                   next_state = exec_cmd(find_master_ctrl(), state);
-               break;
+            default:
+                ENG_ERR(CORE, "unknown cmd:%d ignored\n", cmd);
+                cmd = ENG_THREAD_STATE_EXIT;
+                /* fall-through */
+            case ENG_THREAD_STATE_EXIT:
+                eng_port_flush_ports(&th->ports);
+                break;
+            }
 
-           case ENG_THREAD_STATE_EXIT:
-               /* unreach */
-               break;
+            state = set_thread_state(th, cmd);
+        }
 
-           default:
-               ENG_ERR(CORE, "unknown cmd:%d ignored\n", cmd);
-               next_state = state;
-               break;
-           }
+        if (state == ENG_THREAD_STATE_RUNNING) {
+            if (!task_sched(th)) {
+                eng_port_flush_ports(&th->ports);
+                rte_pause();
+            }
+        } else if (state == ENG_THREAD_STATE_EXIT) {
+            break;
+        } else {
+            rte_pause();
+        }
+    }
 
-           if (state != next_state)
-               state = set_thread_state(th, next_state);
+    if (is_master) {
+        ENG_WARN(CORE, "process going down. pid:%d", getpid());
+        eng_thread_cmd_set(th, ENG_THREAD_STATE_EXIT);
+        set_dead();
+        rte_exit(0, "bye\n");
+    }
 
-           if (state != cmd)
-               set_thread_cmd(th, state);
-       }
-
-       if (state == ENG_THREAD_STATE_RUNNING) {
-           task_sched(th);
-
-           th->flush_window_pos
-               = eng_port_flush_ports(&th->ports,
-                                     th->flush_window_pos,
-                                     th->flush_window_size);
-       }
-   }
-
-   if (is_master)
-       eng_thread_cmd_slaves(ctrl, ENG_THREAD_STATE_EXIT);
-   set_thread_state(th, cmd);
-
-   ENG_WARN(CORE, "bye: %s", th->name);
+    ENG_WARN(CORE, "Exit: %s", th->name);
 }
 
 struct eng_thread_s *
-eng_thread_info(void)
+eng_thread_self_info(void)
 {
-    return LCoreInfo[rte_lcore_id()];
+    struct thread_mng_s *mng = find_mng();
+
+    return mng->lcores[rte_lcore_id()];
+}
+
+unsigned
+eng_thread_nb_threads(void)
+{
+    struct thread_mng_s *mng = find_mng();
+
+    return mng->nb_threads;
+}
+
+struct eng_thread_s *
+eng_thread_info_th(unsigned th_id)
+{
+    struct thread_mng_s *mng = find_mng();
+
+    if (th_id > mng->nb_threads)
+        return NULL;
+    return mng->threads[th_id];
 }
 
 /*
@@ -401,7 +382,7 @@ eng_thread_info(void)
 static int
 thread_entry(void *arg __rte_unused)
 {
-    thread_loop(eng_thread_info());
+    thread_loop(eng_thread_self_info());
     return 0;
 }
 
@@ -563,13 +544,6 @@ create_thread(struct eng_conf_db_s *db,
             th = NULL;
             goto end;
         }
-
-        if (th->nb_ports < ENG_FLUSH_WINDOW_SIZE) {
-            th->flush_window_size = th->nb_ports;
-        } else {
-            th->flush_window_size = ENG_FLUSH_WINDOW_SIZE;
-        }
-
         ENG_DEBUG(CORE, "created thread: %s", name);
     } else {
         ENG_ERR(CORE, "not enough memory: %s", name);
@@ -595,6 +569,15 @@ setup_thread(struct eng_conf_db_s *db,
 /*****************************************************************************
  *
  *****************************************************************************/
+static void *
+poll_primary(void *arg __rte_unused)
+{
+    while (!eng_primary_is_dead())
+        sleep(1);
+
+    rte_exit(0, "Primary is dead, bye.\n");
+}
+
 #define ARRAYOF(_a)	(sizeof(_a)/sizeof(_a[0]))
 
 #define SET_ARG(_ac,_av,_v)                                     \
@@ -607,7 +590,7 @@ setup_thread(struct eng_conf_db_s *db,
     } while (0)
 
 int
-eng_thread_second(char *prog,
+eng_thread_second(const char *prog,
                   unsigned lcore)
 {
     char *args;
@@ -626,19 +609,28 @@ eng_thread_second(char *prog,
         p += (len + 1);
         size -= (len + 1);
 
+#if 0
         len = snprintf(p, size, "--lcores=%u", lcore);
         SET_ARG(ac, av, p);
         p += (len + 1);
         size -= (len + 1);
+#else
+        (void) lcore;
+#endif
 
         len = snprintf(p, size, "--proc-type=secondary");
         SET_ARG(ac, av, p);
         p += (len + 1);
         size -= (len + 1);
 
-        optind = 0;	/* reset getopt */
-        ret = rte_eal_init(ac, av);
+        len = snprintf(p, size, "--no-pci");
+        SET_ARG(ac, av, p);
+        p += (len + 1);
+        size -= (len + 1);
 
+        optind = 0;	/* reset getopt */
+
+        ret = rte_eal_init(ac, av);
         if (ret < 0) {
             fprintf(stderr, "init faile. ret:%d %s",
                     ret, rte_strerror(rte_errno));
@@ -646,6 +638,10 @@ eng_thread_second(char *prog,
             fprintf(stderr, "eal options:\n");
             for (int i = 0; i < ac; i++)
                 fprintf(stderr, "\t%d %s\n", i, av[i]);
+        } else {
+            pthread_t th;
+            if (pthread_create(&th, NULL, poll_primary, NULL))
+                return -1;
         }
 
         free(args);
@@ -707,18 +703,18 @@ eng_thread_launch(struct eng_conf_db_s *db,
     unsigned nb_slaves = 0;
     int ret = -1;
 
-    int xxx = ENG_ERR(CORE, "start\n");
-    fprintf(stderr, "xxx:%d\n", xxx);
+    ENG_ERR(CORE, "start\n");
 
     if (!db)
         return -EINVAL;
 
-    struct eng_master_ctroller_s *ctrl = create_master_ctrl();
-    if (!ctrl)
-        goto end;
-
     if (create_signal_thread(eng_signal))
         goto end;
+
+    if (mng_init())
+        goto end;
+
+    struct thread_mng_s *mng = find_mng();
 
     /* create slaves */
     RTE_LCORE_FOREACH_SLAVE(lcore_id) {
@@ -738,8 +734,8 @@ eng_thread_launch(struct eng_conf_db_s *db,
         if (!th)
             goto end;
 
-        ctrl->th_info[thread_id] = th;
-        LCoreInfo[lcore_id] = th;
+        mng->threads[thread_id] = th;
+        mng->lcores[lcore_id] = th;
 
         ENG_DEBUG(CORE, "done lcore_id: %u", lcore_id);
     }
@@ -761,13 +757,13 @@ eng_thread_launch(struct eng_conf_db_s *db,
         th->nb_slaves = nb_slaves;
 
         for (unsigned i = 1; i <= nb_slaves; i++) {
-            ctrl->th_info[i]->nb_slaves = nb_slaves;
-            STAILQ_INSERT_TAIL(&th->slaves, ctrl->th_info[i], node);
+            mng->threads[i]->nb_slaves = nb_slaves;
+            STAILQ_INSERT_TAIL(&th->slaves, mng->threads[i], node);
         }
 
-        ctrl->th_info[0] = th;
-        LCoreInfo[lcore_id] = th;
-        ctrl->nb_threads = nb_slaves + 1;
+        mng->threads[0] = th;
+        mng->lcores[lcore_id] = th;
+        mng->nb_threads = nb_slaves + 1;
 
         ENG_DEBUG(CORE, "done lcore_id: %u", lcore_id);
     }
@@ -781,11 +777,11 @@ eng_thread_launch(struct eng_conf_db_s *db,
     /* setup threads */
     {
         unsigned thread_id;
-        for (thread_id = 0; thread_id < ctrl->nb_threads; thread_id++) {
-            if (setup_thread(db, ctrl->th_info[thread_id]))
+        for (thread_id = 0; thread_id < mng->nb_threads; thread_id++) {
+            if (setup_thread(db, mng->threads[thread_id]))
                 goto end;
         }
-        ctrl->th_info[0]->conf_db = db;
+        mng->threads[0]->conf_db = db;
     }
 
     ret = rte_eal_mp_remote_launch(thread_entry, NULL, CALL_MASTER);
@@ -852,3 +848,229 @@ eng_thread_lcores(struct eng_conf_db_s *db,
     ENG_DEBUG(CORE, "number of lcores:%u", nb_lcores);
     return nb_lcores;
 }
+
+/*****************************************************************************
+ * cli usage
+ *****************************************************************************/
+static void
+show_usage_raw(FILE *fp,
+               const char *msg,
+               const struct eng_usage_s *usage)
+{
+    fprintf(fp, "%s\n", msg);
+    fprintf(fp,
+            "  pkt:%"PRIu64" call:%"PRIu64" cycle:%"PRIu64" %.1f cycle/pkt %.1f cycle/call\n",
+            usage->events, usage->execs, usage->tsc_sum,
+            (double) usage->tsc_sum / (double) usage->events,
+            (double) usage->tsc_sum / (double) usage->execs);
+
+    fprintf(fp,
+            "  idle:%"PRIu64" cycle:%"PRIu64" call rate:%.1f%% cycle rate:%.1f%% busy:%"PRIu64" except:%"PRIu64"\n",
+            usage->idles, usage->idle_tsc,
+            (double) (usage->execs * 100) / (double) (usage->execs + usage->idles),
+            (double) (usage->tsc_sum * 100) / (double) (usage->tsc_sum + usage->idle_tsc),
+            usage->busies, usage->exceptions);
+}
+
+static struct eng_usage_s *
+show_usage_ext_thread(FILE *fp,
+                      struct eng_thread_s *th,
+                      struct eng_usage_s *usages)
+{
+    struct eng_task_s *task;
+    unsigned seq = 0;
+    char buff[80];
+
+    snprintf(buff, sizeof(buff), "<< %s thread_id:%u lcore:%u >>",
+             th->name, th->thread_id, th->lcore_id);
+    show_usage_raw(fp, buff, usages++);
+
+    STAILQ_FOREACH(task, &th->tasks, node) {
+        snprintf(buff, sizeof(buff), "task:%s seq:%u", task->name, seq++);
+        show_usage_raw(fp, buff, usages++);
+    }
+    fprintf(fp, "\n");
+    return usages;
+}
+
+static unsigned
+get_nb_usages(struct thread_mng_s *mng)
+{
+    unsigned nb = mng->nb_threads;
+
+    for (unsigned i = 0; i < mng->nb_threads; i++) {
+        nb += mng->threads[i]->nb_tasks;
+    }
+    return nb;
+}
+
+static unsigned
+usage_ext_update(struct thread_mng_s *mng,
+                 struct eng_usage_s *usages,
+                 unsigned nb_usages)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < mng->nb_threads; i++) {
+        if (n >= nb_usages)
+            break;
+        usages[n].tsc_sum  = mng->threads[i]->usage.tsc_sum  - usages[n].tsc_sum;
+        usages[n].events   = mng->threads[i]->usage.events   - usages[n].events;
+        usages[n].execs    = mng->threads[i]->usage.execs    - usages[n].execs;
+        usages[n].update   = mng->threads[i]->usage.update   - usages[n].update;
+        usages[n].idle_tsc = mng->threads[i]->usage.idle_tsc - usages[n].idle_tsc;
+        usages[n].idles    = mng->threads[i]->usage.idles    - usages[n].idles;
+        usages[n].busies   = mng->threads[i]->usage.busies   - usages[n].busies;
+        usages[n].exceptions = mng->threads[i]->usage.exceptions - usages[n].exceptions;
+
+        n += 1;
+
+        struct eng_task_s *task;
+        STAILQ_FOREACH(task, &mng->threads[i]->tasks, node) {
+            if (n >= nb_usages)
+                break;
+            usages[n].tsc_sum  = task->usage.tsc_sum  - usages[n].tsc_sum;
+            usages[n].events   = task->usage.events   - usages[n].events;
+            usages[n].execs    = task->usage.execs    - usages[n].execs;
+            usages[n].update   = task->usage.update   - usages[n].update;
+            usages[n].idle_tsc = task->usage.idle_tsc - usages[n].idle_tsc;
+            usages[n].idles    = task->usage.idles    - usages[n].idles;
+            usages[n].busies   = task->usage.busies   - usages[n].busies;
+            usages[n].exceptions = task->usage.exceptions - usages[n].exceptions;
+
+            n += 1;
+        }
+    }
+    return n;
+}
+
+static int
+show_usage_ext(FILE *fp,
+               struct thread_mng_s *mng,
+               unsigned sleeps)
+{
+    unsigned nb_usages = get_nb_usages(mng);
+    struct eng_usage_s *usages;
+
+    usages = calloc(nb_usages, sizeof(*usages));
+    if (usages) {
+        usage_ext_update(mng, usages, nb_usages);
+
+        if (sleeps) {
+            fprintf(fp, "please wait %u seconds\n", sleeps);
+            sleep(sleeps);
+            usage_ext_update(mng, usages, nb_usages);
+        }
+
+        struct eng_usage_s *next = usages;
+        for (unsigned i = 0; i < mng->nb_threads; i++)
+            next = show_usage_ext_thread(fp, mng->threads[i], next);
+
+        free(usages);
+    }
+    return 0;
+}
+
+enum eng_cli_cmd_type_e {
+    CMD_INVALID = -1,
+
+    CMD_DUMP_USAGE,
+
+    NB_CMDs,
+};
+
+static const struct eng_cli_cmd_info_s CmdInfos[NB_CMDs] = {
+    [CMD_DUMP_USAGE] = { "dump", "[--sleep SEC]", },
+};
+
+/* constructor */
+ENG_GENERATE_CLI(TaskUsage, "usage", CmdInfos, cmd_usage);
+
+static const struct option LongOptions[] = {
+    { "cmd",      required_argument, NULL, 'c', },
+    { "help",     no_argument,       NULL, 'h', },
+    { "sleeps",   required_argument, NULL, 's', },
+    { NULL,       0,                 NULL, 0,   },
+};
+
+static int
+cmd_usage(int ac,
+          char *av[])
+{
+    int opt, index;
+    int err = 0;
+    enum eng_cli_cmd_type_e cmd = CMD_INVALID;
+    struct thread_mng_s *mng = find_mng();
+    unsigned sleeps = 1;
+
+    while ((opt = getopt_long(ac, av, "c:t:hs",
+                              LongOptions, &index)) != EOF && !err) {
+        switch (opt) {
+        case 'c':       /* cmd */
+            cmd = eng_cli_get_cmd_type(optarg);
+            break;
+
+        case 'h':       /* Help */
+            CMD_USAGE(TaskUsage);
+            return 0;
+
+        case 's':
+            sleeps = atoi(optarg);
+            break;
+
+        default:
+            err = -EINVAL;
+            break;
+        }
+    }
+
+    if (!err) {
+        switch (cmd) {
+        case CMD_DUMP_USAGE:
+            err = show_usage_ext(eng_stdout, mng, sleeps);
+            break;
+
+        case CMD_INVALID:
+        default:
+            err = -EINVAL;
+            break;
+        }
+    }
+    if (err) {
+        char buff[80];
+
+        fprintf(stderr, "%s\n", strerror_r(-(err), buff, sizeof(buff)));
+        CMD_USAGE(TaskUsage);
+    }
+    return 0;
+}
+
+bool
+eng_thread_is_valid(unsigned thread_id)
+{
+    struct thread_mng_s *mng = find_mng();
+
+    return mng->nb_threads > thread_id;
+}
+
+int
+eng_thread2lcore(unsigned thread_id)
+{
+    struct thread_mng_s *mng = find_mng();
+
+    if (mng->nb_threads > thread_id)
+        return mng->threads[thread_id]->lcore_id;
+    return -1;
+}
+
+int
+eng_lcore2thread(unsigned lcore_id)
+{
+    struct thread_mng_s *mng = find_mng();
+
+    if (lcore_id < RTE_MAX_LCORE &&
+        mng->lcores[lcore_id])
+        return mng->lcores[lcore_id]->thread_id;
+    return -1;
+}
+
+

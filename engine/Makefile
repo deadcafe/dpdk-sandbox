@@ -23,15 +23,17 @@ LIB := libeng.a
 DC_CPPFLAGS=			\
 	-I.			\
 	-I$(ROOT)/compat	\
+	-I$(OUTPUT)/libs/include	\
 	-D_GNU_SOURCE
 
 DC_CFLAGS=	\
-	-O0 -g -std=gnu11 -Werror -Wall -Wextra -Wunused
+	-O3 -g -std=gnu11 -Werror -Wall -Wextra -Wunused
 
 CPPFLAGS += $(DC_CPPFLAGS)
 CFLAGS += $(DC_CFLAGS)
 
 SRCS-y := 		\
+	linenoise.c	\
 	task_if.c	\
 	eng_conf.c	\
 	eng_thread.c	\
@@ -40,6 +42,8 @@ SRCS-y := 		\
 	eng_addon.c	\
 	eng_pdump.c	\
 	eng_log.c	\
+	eng_cmd.c	\
+	eng_cli.c	\
 	eng_timer.c
 
 #	task_rps.c	\
