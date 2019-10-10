@@ -26,6 +26,7 @@
 #include "task_busy.h"
 #include "task_rx.h"
 #include "task_tx.h"
+#include "task_hash.h"
 #include "task_cmd.h"
 #include "cmd_perf.h"
 
@@ -135,6 +136,7 @@ primay_process(const char *prog,
     app_task_busy_register();
     app_task_rx_register();
     app_task_tx_register();
+    app_task_hash_register();
     app_task_cmd_register();
 
     if (eng_conf_setup_addon(db)) {

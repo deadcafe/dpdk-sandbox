@@ -45,6 +45,7 @@ SRCS-y := 		\
 	task_tx.c	\
 	task_cmd.c	\
 	cmd_perf.c	\
+	task_hash.c	\
 	main.c
 
 #thread_usage.c	\
