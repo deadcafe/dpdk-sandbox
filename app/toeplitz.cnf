@@ -1,0 +1,29 @@
+/mbufpool/MBUFPOOL/cache-size 512
+/mbufpool/MBUFPOOL/ext-size 128
+/mbufpool/MBUFPOOL/number-of-mbufs_k 256
+
+/ring/cmd-0/size 8
+/ring/cmd-1/size 8
+
+/port/cmd-0/depend /ring/cmd-0
+/port/cmd-1/depend /ring/cmd-1
+
+/task/cmd-0/addon TkCmd
+/task/cmd-0/in-port cmd-0
+/task/cmd-1/addon TkCmd
+/task/cmd-1/in-port cmd-1
+
+/task/toeplitz/addon TkToeplitz
+
+/thread/master/lcore	6
+/thread/test/lcore   2
+
+/thread/master/tasks cmd-0
+/thread/test/tasks toeplitz,cmd-1
+
+/thread/master/mbufpool MBUFPOOL
+/thread/test/mbufpool MBUFPOOL
+
+/thread/master/is_master
+
+/rte-options	--no-pci
