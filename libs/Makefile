@@ -23,7 +23,7 @@ config-papi:
 	$(MAKE) -C papi/src -f Makefile.configure
 
 papi:	config-papi
-	$(MAKE) -C papi/src all install
+	$(MAKE) -C papi/src install
 
 clean-papi:
 	$(MAKE) -C papi/src clean
