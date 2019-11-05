@@ -52,9 +52,14 @@ struct flow_key_s {
 struct flow_s {
         struct flow_key_s key;
 
-        uint64_t cnt;
-        uint8_t data[128] __attribute__((aligned(64)));
-} __attribute__((aligned(128)));
+        TAILQ_ENTRY(flow_s) node;
+
+        struct {
+                uint64_t pdr_index;
+        } data;
+} __attribute__((aligned(64)));
+
+TAILQ_HEAD(flow_list_s, flow_s);
 
 
 static struct test_pkt_s *
@@ -116,21 +121,15 @@ create_key(unsigned nb,
 }
 
 static struct flow_s *
-create_flow(const struct rte_hash *h,
-            unsigned nb,
-            struct test_pkt_s pkt[])
+alloc_flows(struct flow_list_s *head,
+            unsigned nb)
 {
         struct flow_s *flow = rte_calloc(NULL, nb, sizeof(*flow), 64);
         if (flow) {
                 for (unsigned i = 0; i < nb; i++) {
-                        struct test_pkt_s *pkt_p = &pkt[i];
-
-                        create_key(1, &flow[i].key, &pkt_p);
-                        if (rte_hash_add_key_data(h, &flow[i].key, &flow[i]))
-                                break;
+                        flow[i].data.pdr_index = i;
+                        TAILQ_INSERT_TAIL(head, &flow[i], node);
                 }
-        } else {
-                fprintf(stderr, "failed to allocate memory\n");
         }
         return flow;
 }
@@ -140,6 +139,8 @@ struct hash_test_s {
         struct test_pkt_s *pkt_array;
         struct flow_s *flow_array;
         unsigned nb_data;
+        struct flow_list_s used_list;
+        struct flow_list_s free_list;
 };
 
 static int
@@ -169,10 +170,58 @@ HashTaskInit(struct eng_conf_db_s *conf __rte_unused,
         };
 
         test->hash = rte_hash_create(&param);
-        test->flow_array = create_flow(test->hash, test->nb_data,
-                                       test->pkt_array);
+
+        TAILQ_INIT(&test->used_list);
+        TAILQ_INIT(&test->free_list);
+
+        test->flow_array = alloc_flows(&test->free_list, test->nb_data);
 
         return 0;
+}
+
+static uint64_t
+find_flow(struct rte_hash *hash,
+          struct flow_list_s *used_list,
+          struct flow_list_s *free_list,
+          struct flow_key_s *keys_p[],
+          unsigned nb,
+          struct flow_s *flows[])
+{
+        uint64_t mask = 0;
+        int num = rte_hash_lookup_bulk_data(hash,
+                                            (const void **) keys_p,
+                                            nb,
+                                            &mask,
+                                            (void **) flows);
+        if (num < 0)
+                fprintf(stderr, "failed q\n");
+
+        for (unsigned i = 0; i < nb; i++) {
+                struct flow_s *flow = flows[i];
+
+                if (mask & (1u << i)) {
+                        TAILQ_REMOVE(used_list, flow, node);
+                } else {
+                        flow = TAILQ_FIRST(free_list);
+                        if (flow)
+                                TAILQ_REMOVE(free_list, flow, node);
+                        else {
+                                flow = TAILQ_LAST(used_list, flow_list_s);
+                                TAILQ_REMOVE(used_list, flow, node);
+                                if (rte_hash_del_key(hash, keys_p[i]) < 0)
+                                        fprintf(stderr, "failed\n");
+                        }
+
+                        memcpy(&flow->key, keys_p[i], sizeof(flow->key));
+                        if (rte_hash_add_key_data(hash, &flow->key, flow) < 0)
+                                fprintf(stderr, "failed xx\n");
+                        flows[i] = flow;
+                }
+
+                TAILQ_INSERT_HEAD(used_list, flow, node);
+        }
+
+        return nb;
 }
 
 static unsigned
@@ -181,48 +230,30 @@ HashTaskEntry(struct eng_thread_s *th __rte_unused,
               uint64_t now __rte_unused)
 {
         struct hash_test_s *test = (struct hash_test_s *) task->private_area;
-        unsigned ret = 0;
+        unsigned start = rte_rand() % (test->nb_data - 32);
 
-        for (unsigned i = 0; i < test->nb_data; i += 32) {
-                struct flow_key_s key[32];
-                struct flow_key_s *key_p[32];
-                struct test_pkt_s *pkt[32];
-                struct flow_s *flow[32 + 4];
-                struct flow_s dummy;
+        struct flow_key_s key[32];
+        struct flow_key_s *key_p[32];
+        struct test_pkt_s *pkt[32];
+        struct flow_s *flow[32];
 
-                flow[32 + 0]  = &dummy;
-                flow[32 + 1]  = &dummy;
-                flow[32 + 2]  = &dummy;
-                flow[32 + 3]  = &dummy;
-                for (unsigned j = 0; j < ARRAYOF(key); j++) {
-                        pkt[j]   = &test->pkt_array[i + j];
-                        key_p[j] = &key[j];
-                        flow[j]  = &dummy;
-                }
-
-                create_key(32, key, pkt);
-
-                uint64_t mask = 0;
-                int num = rte_hash_lookup_bulk_data(test->hash,
-                                                    (const void **) key_p,
-                                                    ARRAYOF(key_p),
-                                                    &mask,
-                                                    (void **) flow);
-                rte_prefetch0(flow[0]);
-                rte_prefetch0(flow[1]);
-                rte_prefetch0(flow[2]);
-                rte_prefetch0(flow[3]);
-                for (int i = 0; i < 32; i++) {
-                        flow[i]->cnt += 1;
-                        rte_prefetch0(flow[i + 4]);
-                }
-                if (num != 32)
-                        fprintf(stderr, "not found some data:%u\n", num);
-
-                ret += num;
+        for (unsigned j = 0; j < ARRAYOF(key); j++) {
+                pkt[j]   = &test->pkt_array[start + j];
+                key_p[j] = &key[j];
         }
 
-        return ret;
+        create_key(ARRAYOF(key), key, pkt);
+
+        int num = find_flow(test->hash,
+                            &test->used_list,
+                            &test->free_list,
+                            key_p,
+                            ARRAYOF(key_p),
+                            flow);
+        if (num != (ARRAYOF(key)))
+                fprintf(stderr, "not found some data:%u\n", num);
+
+        return num;
 }
 
 /*
